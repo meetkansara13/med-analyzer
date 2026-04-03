@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
-from app.core.dependencies import rag, tracker
-from app.mlops.tracker import LatencyTimer
+from app.core.dependencies import get_rag, get_tracker
+from app.core.rag_pipeline import MedicalRAGPipeline
+from app.mlops.tracker import MLflowTracker, LatencyTimer
 import re
 
 router = APIRouter(prefix="/chat", tags=["Medical Q&A"])
@@ -64,16 +65,32 @@ def looks_medical_question(question: str) -> bool:
     return medical_hits > 0 and medical_hits >= non_medical_hits
 
 @router.post("/query", response_model=ChatResponse)
-async def chat_query(request: ChatRequest):
+async def chat_query(
+    request: ChatRequest,
+    rag: MedicalRAGPipeline = Depends(get_rag),
+    tracker: MLflowTracker = Depends(get_tracker),
+):
     timer = LatencyTimer()
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     if not looks_medical_question(request.question):
         raise HTTPException(status_code=422, detail=MEDICAL_CHAT_REDIRECT)
+
     result = rag.query(question=request.question, doc_id=request.doc_id)
     latency = timer.elapsed_ms()
-    tracker.track_query(request.question, len(result["answer"].split()), result["confidence"], len(result["sources"]), latency)
-    return ChatResponse(answer=result["answer"], sources=result["sources"], confidence=result["confidence"], latency_ms=latency)
+    tracker.track_query(
+        request.question,
+        len(result["answer"].split()),
+        result["confidence"],
+        len(result["sources"]),
+        latency
+    )
+    return ChatResponse(
+        answer=result["answer"],
+        sources=result["sources"],
+        confidence=result["confidence"],
+        latency_ms=latency
+    )
 
 @router.get("/examples")
 async def get_examples():

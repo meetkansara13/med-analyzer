@@ -2,13 +2,16 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 from loguru import logger
 
+
 class MedicalSummarizer:
     def __init__(self):
         self.model = None
         self.tokenizer = None
-        self._load_model()
+        # ✅ Removed _load_model() from __init__ — model loads on first use
 
     def _load_model(self):
+        if self.model is not None:
+            return  # already loaded
         logger.info("Loading summarizer...")
         try:
             model_name = "sshleifer/distilbart-cnn-12-6"
@@ -22,8 +25,15 @@ class MedicalSummarizer:
             self.tokenizer = None
 
     def summarize(self, text: str, max_length: int = 300, min_length: int = 80, doc_type: str = "general") -> dict:
+        self._load_model()  # ✅ lazy load here
         if not text.strip():
-            return {"summary": "No text provided", "key_findings": [], "recommendations": [], "compression_ratio": 0, "summary_length": 0}
+            return {
+                "summary": "No text provided",
+                "key_findings": [],
+                "recommendations": [],
+                "compression_ratio": 0,
+                "summary_length": 0
+            }
 
         text_chunk = " ".join(text.split()[:900])
 
@@ -62,9 +72,19 @@ class MedicalSummarizer:
         }
 
     def _extract_findings(self, summary: str) -> list:
-        keywords = ["shows", "reveals", "indicates", "found", "detected", "elevated", "low", "normal", "abnormal"]
-        return [s.strip() + "." for s in summary.split(".") if len(s.strip()) > 20 and any(k in s.lower() for k in keywords)][:5]
+        keywords = ["shows", "reveals", "indicates", "found", "detected",
+                    "elevated", "low", "normal", "abnormal"]
+        return [
+            s.strip() + "."
+            for s in summary.split(".")
+            if len(s.strip()) > 20 and any(k in s.lower() for k in keywords)
+        ][:5]
 
     def _extract_recommendations(self, summary: str) -> list:
-        keywords = ["recommend", "suggest", "should", "advised", "follow-up", "prescribe", "monitor"]
-        return [s.strip() + "." for s in summary.split(".") if len(s.strip()) > 20 and any(k in s.lower() for k in keywords)][:3]
+        keywords = ["recommend", "suggest", "should", "advised",
+                    "follow-up", "prescribe", "monitor"]
+        return [
+            s.strip() + "."
+            for s in summary.split(".")
+            if len(s.strip()) > 20 and any(k in s.lower() for k in keywords)
+        ][:3]

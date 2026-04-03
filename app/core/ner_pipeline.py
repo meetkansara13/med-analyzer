@@ -3,12 +3,15 @@ import torch
 from loguru import logger
 from typing import List, Dict
 
+
 class MedicalNERPipeline:
     def __init__(self):
         self.pipeline = None
-        self._load_model()
+        # ✅ Removed _load_model() from __init__ — model loads on first use
 
     def _load_model(self):
+        if self.pipeline is not None:
+            return  # already loaded
         from app.core.config import get_settings
         settings = get_settings()
         logger.info(f"Loading NER model: {settings.NER_MODEL}")
@@ -31,6 +34,7 @@ class MedicalNERPipeline:
             )
 
     def extract_entities(self, text: str) -> Dict[str, List[str]]:
+        self._load_model()  # ✅ lazy load here
         if not text.strip():
             return {}
         chunks = self._chunk_text(text)
@@ -55,7 +59,10 @@ class MedicalNERPipeline:
         return chunks or [text]
 
     def _categorize_entities(self, entities: List[Dict]) -> Dict[str, List[str]]:
-        categorized = {"diseases": [], "drugs": [], "symptoms": [], "anatomy": [], "procedures": [], "other": []}
+        categorized = {
+            "diseases": [], "drugs": [], "symptoms": [],
+            "anatomy": [], "procedures": [], "other": []
+        }
         medical_map = {
             "DISEASE": "diseases", "DRUG": "drugs", "CHEMICAL": "drugs",
             "SYMPTOM": "symptoms", "BODY_PART": "anatomy", "ANATOMY": "anatomy",

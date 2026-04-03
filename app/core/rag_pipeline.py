@@ -32,7 +32,7 @@ Answer:""",
 
 
 class FlanT5LLM(LLM):
-    """Custom LangChain LLM wrapper around flan-t5 that bypasses the broken pipeline() API."""
+    """Custom LangChain LLM wrapper around flan-t5."""
     model: Any = None
     tokenizer: Any = None
     max_new_tokens: int = 512
@@ -67,10 +67,12 @@ class MedicalRAGPipeline:
         self.chain = None
         self.retriever = None
         self.llm = None
-        self._init_embeddings()
-        self._init_llm()
+        # ✅ Removed _init_embeddings() and _init_llm() from __init__
+        #    Models load on first use instead
 
     def _init_embeddings(self):
+        if self.embeddings is not None:
+            return  # already loaded
         logger.info("Initializing embeddings...")
         self.embeddings = HuggingFaceEmbeddings(
             model_name=self.settings.EMBEDDINGS_MODEL,
@@ -80,6 +82,8 @@ class MedicalRAGPipeline:
         logger.success("Embeddings ready")
 
     def _init_llm(self):
+        if self.llm is not None:
+            return  # already loaded
         logger.info("Initializing LLM...")
         try:
             model_name = "google/flan-t5-base"
@@ -93,6 +97,7 @@ class MedicalRAGPipeline:
             self.llm = None
 
     def ingest_document(self, text: str, doc_id: str, metadata: dict = {}) -> int:
+        self._init_embeddings()  # ✅ lazy load
         splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = splitter.split_text(text)
         metadatas = [{**metadata, "doc_id": doc_id, "chunk": i} for i in range(len(chunks))]
@@ -103,6 +108,7 @@ class MedicalRAGPipeline:
         return len(chunks)
 
     def _get_vectorstore(self):
+        self._init_embeddings()  # ✅ lazy load
         if self.vectorstore is None:
             self.vectorstore = Chroma(
                 collection_name=self.settings.CHROMA_COLLECTION,
@@ -112,6 +118,7 @@ class MedicalRAGPipeline:
         return self.vectorstore
 
     def _build_chain(self):
+        self._init_llm()  # ✅ lazy load
         if self._get_vectorstore() and self.llm:
             retriever = self.vectorstore.as_retriever(
                 search_type="mmr",
@@ -163,25 +170,11 @@ class MedicalRAGPipeline:
         if not text_l:
             return True
         boilerplate_patterns = [
-            "general hospital",
-            "medical center",
-            "research centre",
-            "healthcare avenue",
-            "www.",
-            "tel:",
-            "fax:",
-            "department of",
-            "patient discharge summary patient",
-            "contact",
-            "consultation",
-            "gender",
-            "policy no.",
-            "policy no",
-            "section 1",
-            "section 2",
-            "section 10",
-            "star health",
-            "patient information",
+            "general hospital", "medical center", "research centre",
+            "healthcare avenue", "www.", "tel:", "fax:", "department of",
+            "patient discharge summary patient", "contact", "consultation",
+            "gender", "policy no.", "policy no", "section 1", "section 2",
+            "section 10", "star health", "patient information",
             "vital signs & anthropometric measurements",
         ]
         return any(pattern in text_l for pattern in boilerplate_patterns)
@@ -198,14 +191,9 @@ class MedicalRAGPipeline:
         if len(answer_l.split()) < 5:
             return True
         low_value_patterns = [
-            "section 1 patient information",
-            "section 10 follow-up plan",
-            "star health",
-            "policy no",
-            "general hospital",
-            "medical center",
-            "contact",
-            "consultation",
+            "section 1 patient information", "section 10 follow-up plan",
+            "star health", "policy no", "general hospital",
+            "medical center", "contact", "consultation",
         ]
         return any(pattern in answer_l for pattern in low_value_patterns)
 
@@ -247,12 +235,9 @@ class MedicalRAGPipeline:
         qtype = self._direct_question_type(question)
         if not qtype:
             return ""
-
         lines = self._collect_clean_lines(docs)
-
         if not lines:
             return ""
-
         selected = []
         for line in lines:
             line_l = line.lower()
@@ -280,7 +265,6 @@ class MedicalRAGPipeline:
             elif qtype == "discharge":
                 if any(x in line_l for x in ["discharge", "diet", "rehabilitation", "rehab", "monitor", "activity", "lifting", "follow-up"]):
                     selected.append(line)
-
         selected = list(OrderedDict.fromkeys(selected))
         if not selected:
             return ""
@@ -289,7 +273,6 @@ class MedicalRAGPipeline:
     def _rerank_docs(self, question: str, docs, limit: int = 4):
         if not docs:
             return []
-
         keywords = self._question_keywords(question)
         scored = []
         for idx, doc in enumerate(docs):
@@ -300,13 +283,11 @@ class MedicalRAGPipeline:
             for keyword in keywords:
                 if keyword in text:
                     score += 3
-
             if "diagnosis" in question.lower() or "disease" in question.lower():
                 if any(x in text for x in ["diagnosis", "impression", "assessment", "nstemi", "stemi", "acs"]):
                     score += 8
                 if any(x in text for x in ["mg po", "once daily", "twice daily"]) and score < 8:
                     score -= 2
-
             if "symptom" in question.lower() or "complaint" in question.lower():
                 if any(x in text for x in ["presented", "complaint", "pain", "fever", "cough", "palpitations", "syncope"]):
                     score += 6
@@ -316,12 +297,9 @@ class MedicalRAGPipeline:
             if "critical" in question.lower() or "urgent" in question.lower():
                 if any(x in text for x in ["critical", "urgent", "severe", "elevated", "abnormal", "impression"]):
                     score += 7
-
             chunk_bonus = 1 / (idx + 1)
             scored.append((score + chunk_bonus, doc))
-
         scored.sort(key=lambda item: item[0], reverse=True)
-
         unique = OrderedDict()
         for _, doc in scored:
             key = (doc.metadata.get("doc_id"), doc.metadata.get("chunk"), doc.page_content[:120])
@@ -329,16 +307,13 @@ class MedicalRAGPipeline:
                 unique[key] = doc
             if len(unique) >= limit:
                 break
-
         return list(unique.values())
 
     def _extractive_fallback(self, question: str, docs) -> str:
         question_l = question.lower()
         lines = self._collect_clean_lines(docs)
-
         if not lines:
             return "This information is not available in the document."
-
         keyword_groups = []
         if any(x in question_l for x in ["disease", "diagnosis", "condition", "problem", "what kind"]):
             keyword_groups.append(["diagnosis", "impression", "assessment", "nstemi", "stemi", "pneumonia", "infection", "diabetes", "hypertension", "acs"])
@@ -351,110 +326,58 @@ class MedicalRAGPipeline:
         if any(x in question_l for x in ["symptom", "complaint", "fever", "pain", "breath"]):
             keyword_groups.append(["pain", "fever", "cough", "breath", "palpitations", "syncope", "complaint"])
         if any(x in question_l for x in ["discharge", "treatment plan", "plan", "rehab", "diet"]):
-            keyword_groups.append([
-                "discharge", "instructions", "rehabilitation", "rehab", "diet",
-                "monitor", "activity", "lifting", "follow-up", "medication"
-            ])
+            keyword_groups.append(["discharge", "instructions", "rehabilitation", "rehab", "diet", "monitor", "activity", "lifting", "follow-up", "medication"])
         if any(x in question_l for x in ["critical", "urgent", "emergency", "finding"]):
-            keyword_groups.append([
-                "critical", "urgent", "severe", "elevated", "abnormal",
-                "positive", "impression", "finding", "troponin", "depression"
-            ])
+            keyword_groups.append(["critical", "urgent", "severe", "elevated", "abnormal", "positive", "impression", "finding", "troponin", "depression"])
         if any(x in question_l for x in ["test", "tests", "procedure", "procedures", "result", "results"]):
-            keyword_groups.append([
-                "ecg", "echo", "x-ray", "mri", "ct", "scan", "performed",
-                "result", "results", "impression", "showed", "revealed"
-            ])
+            keyword_groups.append(["ecg", "echo", "x-ray", "mri", "ct", "scan", "performed", "result", "results", "impression", "showed", "revealed"])
 
         matches = []
         for line in lines:
             line_l = line.lower()
             if any(any(keyword in line_l for keyword in group) for group in keyword_groups):
                 matches.append(line)
-
         if not matches:
             matches = lines[:3]
 
         if any(x in question_l for x in ["disease", "diagnosis", "condition", "problem", "what kind"]):
             for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["diagnosis", "impression", "assessment", "nstemi", "stemi", "acs"]):
+                if any(x in line.lower() for x in ["diagnosis", "impression", "assessment", "nstemi", "stemi", "acs"]):
                     return self._clean_answer_text(line)
-
         if any(x in question_l for x in ["diagnosis", "condition", "hypertension", "diabetes", "hypothyroidism"]):
-            diagnosis_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["diagnosis", "impression", "assessment", "hypertension", "diabetes", "hypothyroidism", "nstemi", "stemi", "acs"]):
-                    diagnosis_lines.append(self._clean_answer_text(line))
+            diagnosis_lines = [self._clean_answer_text(line) for line in matches if any(x in line.lower() for x in ["diagnosis", "impression", "assessment", "hypertension", "diabetes", "hypothyroidism", "nstemi", "stemi", "acs"])]
             if diagnosis_lines:
                 return self._join_answer_lines(diagnosis_lines, limit=4)
-
         if any(x in question_l for x in ["medicine", "medicines", "drug", "prescribed"]):
-            med_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if re.search(r"\b\d+(?:\.\d+)?\s?(mg|mcg|ml)\b", line_l) or any(x in line_l for x in ["tablet", "tab", "capsule", "po", "once daily", "twice daily", "od", "bd"]):
-                    med_lines.append(self._clean_answer_text(line))
+            med_lines = [self._clean_answer_text(line) for line in matches if re.search(r"\b\d+(?:\.\d+)?\s?(mg|mcg|ml)\b", line.lower()) or any(x in line.lower() for x in ["tablet", "tab", "capsule", "po", "once daily", "twice daily", "od", "bd"])]
             if med_lines:
                 return self._join_answer_lines(med_lines, limit=6)
-
         if any(x in question_l for x in ["discharge", "treatment plan", "plan", "rehab", "diet"]):
-            discharge_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["discharge", "instructions", "rehabilitation", "diet", "monitor", "lifting", "activity"]):
-                    discharge_lines.append(self._clean_answer_text(line))
+            discharge_lines = [self._clean_answer_text(line) for line in matches if any(x in line.lower() for x in ["discharge", "instructions", "rehabilitation", "diet", "monitor", "lifting", "activity"])]
             if discharge_lines:
                 return self._join_answer_lines(discharge_lines, limit=4)
-
         if any(x in question_l for x in ["critical", "urgent", "emergency", "finding"]):
-            critical_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["critical", "urgent", "severe", "elevated", "abnormal", "troponin", "st depression", "impression"]):
-                    critical_lines.append(self._clean_answer_text(line))
+            critical_lines = [self._clean_answer_text(line) for line in matches if any(x in line.lower() for x in ["critical", "urgent", "severe", "elevated", "abnormal", "troponin", "st depression", "impression"])]
             if critical_lines:
                 return self._join_answer_lines(critical_lines, limit=3)
-
         if any(x in question_l for x in ["test", "tests", "procedure", "procedures", "result", "results"]):
-            procedure_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["ecg", "echo", "x-ray", "mri", "ct", "scan", "performed", "showed", "revealed", "impression", "result"]):
-                    procedure_lines.append(self._clean_answer_text(line))
+            procedure_lines = [self._clean_answer_text(line) for line in matches if any(x in line.lower() for x in ["ecg", "echo", "x-ray", "mri", "ct", "scan", "performed", "showed", "revealed", "impression", "result"])]
             if procedure_lines:
                 return self._join_answer_lines(procedure_lines, limit=4)
-
         if any(x in question_l for x in ["lab", "blood sugar", "troponin", "glucose", "creatinine", "hba1c", "result"]):
-            lab_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["troponin", "hba1c", "glucose", "creatinine", "tsh", "cholesterol", "hb"]) or re.search(r"\b\d+(?:\.\d+)?\s?(mg/dl|g/dl|ng/ml|mmhg|%)\b", line_l):
-                    lab_lines.append(self._clean_answer_text(line))
+            lab_lines = [self._clean_answer_text(line) for line in matches if any(x in line.lower() for x in ["troponin", "hba1c", "glucose", "creatinine", "tsh", "cholesterol", "hb"]) or re.search(r"\b\d+(?:\.\d+)?\s?(mg/dl|g/dl|ng/ml|mmhg|%)\b", line.lower())]
             if lab_lines:
                 return self._join_answer_lines(lab_lines, limit=5)
-
         if any(x in question_l for x in ["follow-up", "follow up", "review", "monitoring", "next step"]):
-            followup_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["follow-up", "follow up", "review", "monitor", "repeat", "after 7 days", "in 2 weeks", "advised"]):
-                    followup_lines.append(self._clean_answer_text(line))
+            followup_lines = [self._clean_answer_text(line) for line in matches if any(x in line.lower() for x in ["follow-up", "follow up", "review", "monitor", "repeat", "after 7 days", "in 2 weeks", "advised"])]
             if followup_lines:
                 return self._join_answer_lines(followup_lines, limit=4)
-
         if any(x in question_l for x in ["hypertension", "blood pressure", "mmhg"]):
-            bp_lines = []
-            for line in matches:
-                line_l = line.lower()
-                if any(x in line_l for x in ["hypertension", "blood pressure", "mmhg", "bp"]):
-                    bp_lines.append(self._clean_answer_text(line))
+            bp_lines = [self._clean_answer_text(line) for line in matches if any(x in line.lower() for x in ["hypertension", "blood pressure", "mmhg", "bp"])]
             if bp_lines:
                 return self._join_answer_lines(bp_lines, limit=3)
 
-        answer = " ".join(matches[:3])
-        answer = self._clean_answer_text(answer)
+        answer = self._clean_answer_text(" ".join(matches[:3]))
         return answer if answer else "This information is not available in the document."
 
     def _looks_like_prompt_leak(self, answer: str) -> bool:
@@ -507,11 +430,7 @@ class MedicalRAGPipeline:
                 confidence = min(confidence, 0.35)
 
             sources = [{"text": d.page_content[:200], "metadata": d.metadata} for d in docs]
-            return {
-                "answer": answer_clean,
-                "sources": sources,
-                "confidence": confidence
-            }
+            return {"answer": answer_clean, "sources": sources, "confidence": confidence}
         except Exception as e:
             logger.error(f"Query error: {e}")
             return {"answer": f"Error: {str(e)}", "sources": [], "confidence": 0.0}

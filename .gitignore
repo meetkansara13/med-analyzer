@@ -1,0 +1,8 @@
+med-env/
+__pycache__/
+*.pyc
+.env
+mlruns/
+*.log
+token.txt
+.env
